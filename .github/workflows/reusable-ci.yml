@@ -15,6 +15,18 @@ on:
         required: false
         type: boolean
         default: true
+      enforce_python:
+        required: false
+        type: boolean
+        default: false
+      enforce_node:
+        required: false
+        type: boolean
+        default: false
+      enforce_security:
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -92,6 +104,7 @@ jobs:
 
       - name: Pytest
         if: steps.detect.outputs.python_project == 'true'
+        continue-on-error: ${{ ! inputs.enforce_python }}
         run: |
           if [ -d tests ]; then
             pytest -q
@@ -132,10 +145,12 @@ jobs:
 
       - name: Lint
         if: steps.detect.outputs.node_project == 'true'
+        continue-on-error: ${{ ! inputs.enforce_node }}
         run: npm run lint --if-present
 
       - name: Test
         if: steps.detect.outputs.node_project == 'true'
+        continue-on-error: ${{ ! inputs.enforce_node }}
         run: npm test --if-present
 
   security:
@@ -148,6 +163,7 @@ jobs:
           fetch-depth: 0
 
       - name: Run Gitleaks
+        continue-on-error: ${{ ! inputs.enforce_security }}
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -30,140 +30,270 @@ on:
 
 permissions:
   contents: read
-  security-events: write
   actions: read
+  security-events: write
 
 jobs:
-  repo-health:
-    name: Repository health
+  diagnostics:
+    name: Global diagnostics
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Generate repository health report
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare diagnostics directory
         shell: bash
         run: |
-          mkdir -p reports
+          mkdir -p diagnostics
+
+      - name: Generate repo-health.md
+        shell: bash
+        run: |
           {
-            echo "# Repository Health Report"
+            echo "# Repository Health"
             echo
-            echo "Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo
-            echo "## Files"
-            find . -maxdepth 3 -type f | sort | sed 's#^\./#- #'
+            echo "Generated UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "Repository: ${GITHUB_REPOSITORY}"
+            echo "Ref: ${GITHUB_REF}"
+            echo "SHA: ${GITHUB_SHA}"
+            echo "Actor: ${GITHUB_ACTOR}"
             echo
             echo "## Required files"
-            for f in README.md .gitignore .github/workflows/global-ci.yml; do
-              if [ -f "$f" ]; then
+            echo
+            for f in README.md README.txt .gitignore .github/workflows/global-ci.yml pyproject.toml requirements.txt package.json; do
+              if [ -e "$f" ]; then
                 echo "- OK: $f"
               else
                 echo "- MISSING: $f"
               fi
             done
-          } | tee reports/repo-health.md
+            echo
+            echo "## Top-level tree"
+            echo
+            find . -maxdepth 3 -type f \
+              -not -path "./.git/*" \
+              -not -path "./node_modules/*" \
+              -not -path "./.venv/*" \
+              | sort | sed 's#^\./#- #'
+            echo
+            echo "## Git status"
+            echo
+            git status --short || true
+            echo
+            echo "## Recent commits"
+            echo
+            git log --oneline --decorate -10 || true
+          } | tee diagnostics/repo-health.md
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: repo-health-report
-          path: reports/repo-health.md
-
-  python:
-    name: Python checks
-    runs-on: ubuntu-latest
-    if: ${{ inputs.run_python }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Detect Python
-        id: detect
+      - name: Generate python-diagnostics.txt
+        if: ${{ inputs.run_python }}
         shell: bash
         run: |
-          if [ -f pyproject.toml ] || [ -f requirements.txt ] || find . -maxdepth 3 -name "*.py" | grep -q .; then
-            echo "python_project=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "python_project=false" >> "$GITHUB_OUTPUT"
-          fi
+          {
+            echo "=== PYTHON DIAGNOSTICS ==="
+            echo "Generated UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo
+            echo "[1] Detection"
+            if [ -f pyproject.toml ] || [ -f requirements.txt ] || find . -maxdepth 4 -name "*.py" | grep -q .; then
+              echo "python_project=true"
+            else
+              echo "python_project=false"
+              exit 0
+            fi
+            echo
+            echo "[2] Python files"
+            find . -maxdepth 5 -name "*.py" \
+              -not -path "./.git/*" \
+              -not -path "./.venv/*" \
+              | sort || true
+            echo
+            echo "[3] Python version"
+            python --version || true
+            echo
+            echo "[4] Dependency files"
+            ls -la pyproject.toml requirements.txt setup.py setup.cfg 2>/dev/null || true
+            echo
+            echo "[5] Install tooling"
+            python -m pip install --upgrade pip
+            python -m pip install ruff pytest pip-audit || true
+            if [ -f requirements.txt ]; then
+              echo
+              echo "[6] Install requirements"
+              python -m pip install -r requirements.txt || true
+            fi
+            echo
+            echo "[7] Ruff"
+            ruff check . || true
+            echo
+            echo "[8] Pytest"
+            if [ -d tests ]; then
+              pytest -q || true
+            else
+              echo "No tests directory found."
+            fi
+            echo
+            echo "[9] pip freeze"
+            python -m pip freeze || true
+            echo
+            echo "[10] pip-audit"
+            pip-audit || true
+          } | tee diagnostics/python-diagnostics.txt
 
-      - uses: actions/setup-python@v5
-        if: steps.detect.outputs.python_project == 'true'
-        with:
-          python-version: "3.12"
-
-      - name: Install tooling
-        if: steps.detect.outputs.python_project == 'true'
+      - name: Enforce Python checks
+        if: ${{ inputs.run_python && inputs.enforce_python }}
+        shell: bash
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install ruff pytest
-          if [ -f requirements.txt ]; then
-            python -m pip install -r requirements.txt || true
+          if [ -f pyproject.toml ] || [ -f requirements.txt ] || find . -maxdepth 4 -name "*.py" | grep -q .; then
+            python -m pip install --upgrade pip
+            python -m pip install ruff pytest
+            if [ -f requirements.txt ]; then
+              python -m pip install -r requirements.txt
+            fi
+            ruff check .
+            if [ -d tests ]; then
+              pytest -q
+            fi
           fi
 
-      - name: Ruff
-        if: steps.detect.outputs.python_project == 'true'
-        run: ruff check . || true
-
-      - name: Pytest
-        if: steps.detect.outputs.python_project == 'true'
-        continue-on-error: ${{ ! inputs.enforce_python }}
+      - name: Generate dependency-summary.txt
+        shell: bash
         run: |
-          if [ -d tests ]; then
-            pytest -q
-          else
-            echo "No tests directory found; skipping pytest."
-          fi
+          {
+            echo "=== DEPENDENCY SUMMARY ==="
+            echo "Generated UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo
+            echo "[1] Detected manifests"
+            find . -maxdepth 5 \( \
+              -name "requirements.txt" -o \
+              -name "pyproject.toml" -o \
+              -name "setup.py" -o \
+              -name "setup.cfg" -o \
+              -name "package.json" -o \
+              -name "package-lock.json" -o \
+              -name "yarn.lock" -o \
+              -name "pnpm-lock.yaml" -o \
+              -name "Dockerfile" -o \
+              -name "docker-compose.yml" \
+            \) -not -path "./.git/*" | sort || true
+            echo
+            echo "[2] Python requirements preview"
+            if [ -f requirements.txt ]; then
+              sed -n '1,200p' requirements.txt
+            else
+              echo "No requirements.txt"
+            fi
+            echo
+            echo "[3] pyproject preview"
+            if [ -f pyproject.toml ]; then
+              sed -n '1,220p' pyproject.toml
+            else
+              echo "No pyproject.toml"
+            fi
+            echo
+            echo "[4] Node package preview"
+            if [ -f package.json ]; then
+              sed -n '1,220p' package.json
+            else
+              echo "No package.json"
+            fi
+          } | tee diagnostics/dependency-summary.txt
 
-  node:
-    name: Node checks
-    runs-on: ubuntu-latest
-    if: ${{ inputs.run_node }}
-    steps:
-      - uses: actions/checkout@v4
+      - name: Generate Node diagnostics
+        if: ${{ inputs.run_node }}
+        shell: bash
+        run: |
+          {
+            echo "=== NODE DIAGNOSTICS ==="
+            echo "Generated UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo
+            if [ ! -f package.json ]; then
+              echo "node_project=false"
+              exit 0
+            fi
+            echo "node_project=true"
+            echo
+            echo "[1] Node version"
+            node --version || true
+            npm --version || true
+            echo
+            echo "[2] Install dependencies"
+            if [ -f package-lock.json ]; then
+              npm ci || true
+            else
+              npm install || true
+            fi
+            echo
+            echo "[3] npm scripts"
+            npm run || true
+            echo
+            echo "[4] lint"
+            npm run lint --if-present || true
+            echo
+            echo "[5] test"
+            npm test --if-present || true
+            echo
+            echo "[6] npm audit"
+            npm audit --audit-level=low || true
+          } | tee diagnostics/node-diagnostics.txt
 
-      - name: Detect Node
-        id: detect
+      - name: Enforce Node checks
+        if: ${{ inputs.run_node && inputs.enforce_node }}
         shell: bash
         run: |
           if [ -f package.json ]; then
-            echo "node_project=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "node_project=false" >> "$GITHUB_OUTPUT"
+            if [ -f package-lock.json ]; then
+              npm ci
+            else
+              npm install
+            fi
+            npm run lint --if-present
+            npm test --if-present
           fi
 
-      - uses: actions/setup-node@v4
-        if: steps.detect.outputs.node_project == 'true'
-        with:
-          node-version: "20"
-
-      - name: Install dependencies
-        if: steps.detect.outputs.node_project == 'true'
+      - name: Generate security-diagnostics.txt
+        if: ${{ inputs.run_security }}
+        shell: bash
         run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install
-          fi
-
-      - name: Lint
-        if: steps.detect.outputs.node_project == 'true'
-        continue-on-error: ${{ ! inputs.enforce_node }}
-        run: npm run lint --if-present
-
-      - name: Test
-        if: steps.detect.outputs.node_project == 'true'
-        continue-on-error: ${{ ! inputs.enforce_node }}
-        run: npm test --if-present
-
-  security:
-    name: Secret scan
-    runs-on: ubuntu-latest
-    if: ${{ inputs.run_security }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+          {
+            echo "=== SECURITY DIAGNOSTICS ==="
+            echo "Generated UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo
+            echo "[1] Security-sensitive filenames"
+            find . -maxdepth 6 \( \
+              -iname "*.pem" -o \
+              -iname "*.key" -o \
+              -iname "*.p12" -o \
+              -iname "*.pfx" -o \
+              -iname ".env" -o \
+              -iname ".env.*" -o \
+              -iname "*secret*" -o \
+              -iname "*token*" -o \
+              -iname "*credential*" \
+            \) -not -path "./.git/*" | sort || true
+            echo
+            echo "[2] GitHub workflow files"
+            find .github/workflows -maxdepth 2 -type f -print -exec sed -n '1,220p' {} \; 2>/dev/null || true
+            echo
+            echo "[3] Gitleaks SARIF note"
+            echo "If Gitleaks finds leaks, see the gitleaks-results artifact/SARIF."
+          } | tee diagnostics/security-diagnostics.txt
 
       - name: Run Gitleaks
+        if: ${{ inputs.run_security }}
         continue-on-error: ${{ ! inputs.enforce_security }}
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload diagnostics artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: global-diagnostics
+          path: |
+            diagnostics/repo-health.md
+            diagnostics/python-diagnostics.txt
+            diagnostics/security-diagnostics.txt
+            diagnostics/dependency-summary.txt
+            diagnostics/node-diagnostics.txt
+          if-no-files-found: warn
